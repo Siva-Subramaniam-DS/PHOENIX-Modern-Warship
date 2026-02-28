@@ -70,15 +70,18 @@ class GoogleSheetManager:
         if not self.event_sheet: return
         try:
             # Columns: EventID, Tournament, Mode, Round, Team1, Team2, Date, Time, Judge, Recorder, Winner, Score, Remarks
+            team1_cap = event_data.get('team1_captain', 'Unknown')
+            team2_cap = event_data.get('team2_captain', 'Unknown')
+            
             row = [
-                event_data['event_id'],
-                event_data['tournament'],
+                event_data.get('event_id', event_data.get('id', 'Unknown')),
+                event_data.get('tournament', 'Unknown'),
                 event_data.get('mode', 'MW'),
-                event_data['round'],
-                event_data['team1_captain'].name,
-                event_data['team2_captain'].name,
-                event_data['date_str'],
-                event_data['time_str'],
+                event_data.get('round', 'Unknown'),
+                team1_cap.name if hasattr(team1_cap, 'name') else str(team1_cap),
+                team2_cap.name if hasattr(team2_cap, 'name') else str(team2_cap),
+                event_data.get('date_str', 'TBD'),
+                event_data.get('time_str', 'TBD'),
                 "Unassigned", # Judge
                 "Unassigned", # Recorder
                 "Pending", # Winner
@@ -4603,6 +4606,19 @@ async def add_captain(interaction: discord.Interaction, round: str, team1: str, 
             await interaction.response.send_message("❌ Invalid round. Please select R1-R10, Q, SF, or Final.", ephemeral=True)
             return
         
+        # Check if team1 or team2 have user mentions and extract username
+        user_id_match1 = re.search(r'<@!?(\d+)>', team1)
+        if user_id_match1:
+            user1 = interaction.guild.get_member(int(user_id_match1.group(1)))
+            if user1:
+                team1 = user1.name
+
+        user_id_match2 = re.search(r'<@!?(\d+)>', team2)
+        if user_id_match2:
+            user2 = interaction.guild.get_member(int(user_id_match2.group(1)))
+            if user2:
+                team2 = user2.name
+                
         # Get current channel
         channel = interaction.channel
         
@@ -4670,9 +4686,9 @@ async def add_captain(interaction: discord.Interaction, round: str, team1: str, 
         rules_embed.add_field(
             name="📋 Tournament Information",
             value=(
-                "• Refer to https://discord.com/channels/1097272892984676432/1474159759258161173 for match schedules and pairings.\n"
-                "• Refer to https://discord.com/channels/1097272892984676432/1473773972851003454 for official updates.\n"
-                "• Refer to https://discord.com/channels/1097272892984676432/1474159724659474442 for tournament guidelines and regulations."
+                "• Refer to https://discord.com/channels/1046748939631726592/1467196270836715601 for match schedules and pairings.\n"
+                "• Refer to https://discord.com/channels/1046748939631726592/1467196182236369099 for official updates.\n"
+                "• Refer to https://discord.com/channels/1046748939631726592/1467196250414907506 for tournament guidelines and regulations."
             ),
             inline=False
         )
@@ -4685,7 +4701,7 @@ async def add_captain(interaction: discord.Interaction, round: str, team1: str, 
         
         rules_embed.add_field(
             name="🆘 Need Help?",
-            value="If you require any assistance, please ping <@&1473773792995315913> and they will be happy to assist.",
+            value="If you require any assistance, please ping <@&1467201706633986251> and they will be happy to assist.",
             inline=False
         )
         
@@ -4697,20 +4713,87 @@ async def add_captain(interaction: discord.Interaction, round: str, team1: str, 
         
         rules_embed.set_footer(text=f"{ORGANIZATION_NAME} | {interaction.user.name} ✰—• • {datetime.datetime.now().strftime('%d-%m-%Y %H:%M')}")
         
-        # Send the rules message with logo
+        # Generate match poster
+        poster_path = None
         try:
-            logo_path = os.path.join(os.path.dirname(__file__), "PHOENIX Modern Warship Logo.jpg")
-            with open(logo_path, "rb") as logo_file:
-                logo_data = io.BytesIO(logo_file.read())
-                logo_file = discord.File(logo_data, filename="logo.jpg")
-                await channel.send(embed=rules_embed, file=logo_file)
-        except FileNotFoundError:
-            print("Warning: PHOENIX Modern Warship Logo.jpg not found, sending embed without logo")
-            await channel.send(embed=rules_embed)
+            template = get_random_template()
+            if template:
+                poster_path = create_event_poster(
+                    template_path=template,
+                    round_label=round,
+                    team1_captain=team1,
+                    team2_captain=team2,
+                    utc_time="TBD",
+                    date_str="TBD",
+                    server_name=ORGANIZATION_NAME
+                )
         except Exception as e:
-            print(f"Warning: Could not send logo, sending embed without logo: {e}")
+            print(f"Error generating poster in add_captain: {e}")
+
+        # Send the rules message with logo and poster
+        try:
+            files_to_send = []
+            
+            logo_path = os.path.join(os.path.dirname(__file__), "PHOENIX Modern Warship Logo.jpg")
+            if os.path.exists(logo_path):
+                with open(logo_path, "rb") as logo_file:
+                    logo_data = io.BytesIO(logo_file.read())
+                    discord_logo = discord.File(logo_data, filename="logo.jpg")
+                    rules_embed.set_thumbnail(url="attachment://logo.jpg")
+                    files_to_send.append(discord_logo)
+            
+            if poster_path and os.path.exists(poster_path):
+                poster_file = discord.File(poster_path, filename="poster.png")
+                rules_embed.set_image(url="attachment://poster.png")
+                files_to_send.append(poster_file)
+
+            if files_to_send:
+                await channel.send(embed=rules_embed, files=files_to_send)
+            else:
+                await channel.send(embed=rules_embed)
+                
+            if poster_path and os.path.exists(poster_path):
+                os.remove(poster_path)
+                
+        except Exception as e:
+            print(f"Warning: Could not send files, sending embed only: {e}")
             await channel.send(embed=rules_embed)
-        
+            if poster_path and os.path.exists(poster_path):
+                os.remove(poster_path)
+
+        # Store in scheduled_events.json
+        try:
+            event_id = f"EVT-{int(datetime.datetime.now().timestamp())}"
+            while event_id in scheduled_events:
+                event_id = f"EVT-{int(datetime.datetime.now().timestamp()) + random.randint(100, 999)}"
+
+            event_data = {
+                'id': event_id,
+                'event_id': event_id,
+                'team1_captain': captain1,
+                'team2_captain': captain2,
+                'team1_name': team1,
+                'team2_name': team2,
+                'datetime': datetime.datetime.now(pytz.UTC),
+                'time_str': 'TBD',
+                'date_str': 'TBD',
+                'round': round,
+                'tournament': 'Quick Match',
+                'mode': 'MW',
+                'group': bracket,
+                'channel_id': interaction.channel.id,
+                'created_at': datetime.datetime.now().isoformat(),
+                'created_by': interaction.user.id,
+                'status': 'scheduled',
+                'poster_path': poster_path,
+                'captain1_id': captain1.id if captain1 else None,
+                'captain2_id': captain2.id if captain2 else None
+            }
+            scheduled_events[event_id] = event_data
+            save_scheduled_events()
+            sheet_manager.log_event_creation(event_data)
+        except Exception as e:
+            print(f"Error saving event to json/sheet in add_captain: {e}")
         
     except Exception as e:
         await interaction.response.send_message(f"❌ An error occurred: {str(e)}", ephemeral=True)
