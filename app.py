@@ -3789,7 +3789,15 @@ async def event_result(
             att_text += f"\n🏆 {winner} ({winner_score}) Vs ({loser_score}) {loser} 💀\n\n"
             att_text += f"**Staffs**\n• Judge: {interaction.user.mention}\n"
             rec_id = event_data.get('recorder')
-            att_text += f"• Recorder: <@{rec_id}>" if rec_id else "• Recorder: None"
+            if rec_id:
+                if isinstance(rec_id, int):
+                    att_text += f"• Recorder: <@{rec_id}>"
+                elif hasattr(rec_id, 'mention'):
+                    att_text += f"• Recorder: {rec_id.mention}"
+                else:
+                    att_text += f"• Recorder: {rec_id}"
+            else:
+                att_text += "• Recorder: None"
             await staff_attendance_channel.send(att_text)
             
             # Log to sheet
