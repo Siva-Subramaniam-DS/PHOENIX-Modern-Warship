@@ -164,10 +164,10 @@ load_dotenv()
 
 # Channel IDs for event management
 CHANNEL_IDS = {
-    "take_schedule": 1473774001649090600,
-    "results": 1473774002970558486,
-    "transcript": 1474159906658713733,
-    "staff_attendance": 1473774005235220601
+    "take_schedule": 1467197180971319368,
+    "results": 1467197219621966049,
+    "transcript": 1467196373010092143,
+    "staff_attendance": 1467197265927213208
 }
 
 # Bot Owner ID for special permissions
