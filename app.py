@@ -4983,6 +4983,11 @@ async def choose(interaction: discord.Interaction, options: str):
 async def exchange(interaction: discord.Interaction, role: app_commands.Choice[str], new_user: discord.Member):
     """Exchanges a staff member for events in the current channel."""
     
+    # Check permissions
+    if not (has_event_create_permission(interaction) or has_event_result_permission(interaction)):
+        await interaction.response.send_message("❌ You need **Head Organizer**, **Head Helper**, **Helper Team** or **Judge** role to exchange staff.", ephemeral=True)
+        return
+
     current_channel_id = interaction.channel.id
     event_found = False
     
