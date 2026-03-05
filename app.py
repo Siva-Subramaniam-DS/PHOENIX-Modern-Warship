@@ -4578,10 +4578,10 @@ async def general_tie_breaker(
 @tree.command(name="add_captain", description="Add two captains to a tournament match and rename the channel")
 @app_commands.describe(
     round="Round of the tournament (R1-R10, Q, SF, Final)",
-    team1="Team 1: type a team name OR @mention the captain (auto-sets captain)",
-    captain1="Captain of Team 1 (optional if you @mentioned them in team1)",
-    team2="Team 2: type a team name OR @mention the captain (auto-sets captain)",
-    captain2="Captain of Team 2 (optional if you @mentioned them in team2)",
+    captain1="Captain of Team 1 (required)",
+    captain2="Captain of Team 2 (required)",
+    team1="Team 1 name (optional — leave blank to use Captain 1's name)",
+    team2="Team 2 name (optional — leave blank to use Captain 2's name)",
     bracket="Optional bracket identifier (e.g., A, B, Winner, Loser)"
 )
 @app_commands.choices(
@@ -4604,10 +4604,10 @@ async def general_tie_breaker(
 async def add_captain(
     interaction: discord.Interaction,
     round: str,
-    team1: str,
-    team2: str,
-    captain1: Optional[discord.Member] = None,
-    captain2: Optional[discord.Member] = None,
+    captain1: discord.Member,
+    captain2: discord.Member,
+    team1: Optional[str] = None,
+    team2: Optional[str] = None,
     bracket: str = None
 ):
     """Add two captains to a tournament match and rename the channel with tournament rules."""
@@ -4623,45 +4623,35 @@ async def add_captain(
             await interaction.response.send_message("\u274c Invalid round. Please select R1-R10, Q, SF, or Final.", ephemeral=True)
             return
 
-        # ── Resolve Team 1 ──────────────────────────────────────────
-        # If a mention like <@123456> was typed into the team1 field,
-        # use that member's display name as the team name AND set them
-        # as captain1 (unless captain1 was separately provided).
-        user_id_match1 = re.search(r'<@!?(\d+)>', team1)
-        if user_id_match1:
-            member1 = interaction.guild.get_member(int(user_id_match1.group(1)))
-            if member1:
-                team1 = member1.display_name    # team name = their display name
-                if captain1 is None:             # auto-set captain if not explicitly provided
-                    captain1 = member1
+        # ── Resolve Team 1 name ────────────────────────────────────
+        # If team1 is empty → use captain1's display name
+        # If team1 has a typed @mention (e.g. <@id>) → extract their display name
+        # Otherwise use team1 as-is
+        if not team1:
+            team1 = captain1.display_name
+        else:
+            team1 = team1.strip()
+            user_id_match1 = re.search(r'<@!?(\d+)>', team1)
+            if user_id_match1:
+                member1 = interaction.guild.get_member(int(user_id_match1.group(1)))
+                if member1:
+                    team1 = member1.display_name
 
-        # ── Resolve Team 2 ──────────────────────────────────────────
-        user_id_match2 = re.search(r'<@!?(\d+)>', team2)
-        if user_id_match2:
-            member2 = interaction.guild.get_member(int(user_id_match2.group(1)))
-            if member2:
-                team2 = member2.display_name
-                if captain2 is None:
-                    captain2 = member2
-
-        # ── Validate captains are resolved ──────────────────────────
-        if captain1 is None:
-            await interaction.response.send_message(
-                "\u274c **captain1** is required when **team1** is a plain team name (not a @mention).",
-                ephemeral=True
-            )
-            return
-        if captain2 is None:
-            await interaction.response.send_message(
-                "\u274c **captain2** is required when **team2** is a plain team name (not a @mention).",
-                ephemeral=True
-            )
-            return
+        # ── Resolve Team 2 name ────────────────────────────────────
+        if not team2:
+            team2 = captain2.display_name
+        else:
+            team2 = team2.strip()
+            user_id_match2 = re.search(r'<@!?(\d+)>', team2)
+            if user_id_match2:
+                member2 = interaction.guild.get_member(int(user_id_match2.group(1)))
+                if member2:
+                    team2 = member2.display_name
 
         # Get current channel
         channel = interaction.channel
         
-        # Create new channel name using team names
+        # Create new channel name using resolved team names
         if bracket:
             new_name = f"{bracket}-{round.lower()}-{team1.lower()}-vs-{team2.lower()}"
         else:
