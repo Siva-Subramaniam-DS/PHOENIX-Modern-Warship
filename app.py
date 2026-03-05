@@ -4578,10 +4578,10 @@ async def general_tie_breaker(
 @tree.command(name="add_captain", description="Add two captains to a tournament match and rename the channel")
 @app_commands.describe(
     round="Round of the tournament (R1-R10, Q, SF, Final)",
-    team1="Name of the first team",
-    captain1="Mention Captain of Team 1",
-    team2="Name of the second team",
-    captain2="Mention Captain of Team 2",
+    team1="Team 1: type a team name OR @mention the captain (auto-sets captain)",
+    captain1="Captain of Team 1 (optional if you @mentioned them in team1)",
+    team2="Team 2: type a team name OR @mention the captain (auto-sets captain)",
+    captain2="Captain of Team 2 (optional if you @mentioned them in team2)",
     bracket="Optional bracket identifier (e.g., A, B, Winner, Loser)"
 )
 @app_commands.choices(
@@ -4601,33 +4601,63 @@ async def general_tie_breaker(
         app_commands.Choice(name="Final", value="Final")
     ]
 )
-async def add_captain(interaction: discord.Interaction, round: str, team1: str, captain1: discord.Member, team2: str, captain2: discord.Member, bracket: str = None):
+async def add_captain(
+    interaction: discord.Interaction,
+    round: str,
+    team1: str,
+    team2: str,
+    captain1: Optional[discord.Member] = None,
+    captain2: Optional[discord.Member] = None,
+    bracket: str = None
+):
     """Add two captains to a tournament match and rename the channel with tournament rules."""
     try:
         # Check permissions - only Head Helper, Helper Team, Head Organizer, or Bot Owner can add captains
         if not has_event_create_permission(interaction):
-            await interaction.response.send_message("❌ You don't have permission to use this command. Only staff (Helper/Organizer) or Bot Owner can add captains.", ephemeral=True)
+            await interaction.response.send_message("\u274c You don't have permission to use this command. Only staff (Helper/Organizer) or Bot Owner can add captains.", ephemeral=True)
             return
         
         # Validate round parameter
         valid_rounds = ["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10", "Q", "SF", "Final"]
         if round not in valid_rounds:
-            await interaction.response.send_message("❌ Invalid round. Please select R1-R10, Q, SF, or Final.", ephemeral=True)
+            await interaction.response.send_message("\u274c Invalid round. Please select R1-R10, Q, SF, or Final.", ephemeral=True)
             return
-        
-        # Check if team1 or team2 have user mentions and extract username
+
+        # ── Resolve Team 1 ──────────────────────────────────────────
+        # If a mention like <@123456> was typed into the team1 field,
+        # use that member's display name as the team name AND set them
+        # as captain1 (unless captain1 was separately provided).
         user_id_match1 = re.search(r'<@!?(\d+)>', team1)
         if user_id_match1:
-            user1 = interaction.guild.get_member(int(user_id_match1.group(1)))
-            if user1:
-                team1 = user1.name
+            member1 = interaction.guild.get_member(int(user_id_match1.group(1)))
+            if member1:
+                team1 = member1.display_name    # team name = their display name
+                if captain1 is None:             # auto-set captain if not explicitly provided
+                    captain1 = member1
 
+        # ── Resolve Team 2 ──────────────────────────────────────────
         user_id_match2 = re.search(r'<@!?(\d+)>', team2)
         if user_id_match2:
-            user2 = interaction.guild.get_member(int(user_id_match2.group(1)))
-            if user2:
-                team2 = user2.name
-                
+            member2 = interaction.guild.get_member(int(user_id_match2.group(1)))
+            if member2:
+                team2 = member2.display_name
+                if captain2 is None:
+                    captain2 = member2
+
+        # ── Validate captains are resolved ──────────────────────────
+        if captain1 is None:
+            await interaction.response.send_message(
+                "\u274c **captain1** is required when **team1** is a plain team name (not a @mention).",
+                ephemeral=True
+            )
+            return
+        if captain2 is None:
+            await interaction.response.send_message(
+                "\u274c **captain2** is required when **team2** is a plain team name (not a @mention).",
+                ephemeral=True
+            )
+            return
+
         # Get current channel
         channel = interaction.channel
         
