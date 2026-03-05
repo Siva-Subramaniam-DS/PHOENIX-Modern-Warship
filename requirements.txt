@@ -26,3 +26,6 @@ requests>=2.31.0
 gspread>=5.10.0
 google-auth>=2.22.0
 
+# Async HTTP client (for Challonge API in /bracket_open)
+aiohttp>=3.9.0
+
