@@ -173,6 +173,14 @@ CHANNEL_IDS = {
 # Bot Owner ID for special permissions
 BOT_OWNER_ID = 1251442077561131059
 
+# Challonge API Configuration
+# Set CHALLONGE_API_KEY in your .env file to enable /bracket_open
+CHALLONGE_API_KEY = os.environ.get("CHALLONGE_API_KEY", "")
+CHALLONGE_TOURNAMENT_URL = os.environ.get("CHALLONGE_TOURNAMENT_URL", "Stealth_Strike")  # The slug in the URL
+
+# Ticket Category ID — set TICKET_CATEGORY_ID in .env, or leave 0 to use the same category as command channel
+TICKET_CATEGORY_ID = int(os.environ.get("TICKET_CATEGORY_ID", "0"))
+
 # Branding constants
 ORGANIZATION_NAME = "PHOENIX Modern Warship"
 TOURNAMENT_SYSTEM_NAME = "PHOENIX Modern Warship Tournament System"
@@ -5112,6 +5120,324 @@ async def tournament_setup(interaction: discord.Interaction, bracket_link: Optio
     embed.set_footer(text=f"Powered by • {ORGANIZATION_NAME}")
     
     await interaction.followup.send(embed=embed)
+
+
+# ===========================================================================================
+# BRACKET OPEN COMMAND — Opens a ticket channel based on the Challonge bracket
+# ===========================================================================================
+
+async def _fetch_challonge(endpoint: str, params: dict = None) -> dict | list | None:
+    """Async wrapper around Challonge REST API v1."""
+    import aiohttp
+    base = "https://api.challonge.com/v1"
+    p = {"api_key": CHALLONGE_API_KEY}
+    if params:
+        p.update(params)
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{base}/{endpoint}", params=p, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+                print(f"Challonge API error {resp.status}: {await resp.text()}")
+                return None
+    except Exception as e:
+        print(f"Challonge request failed: {e}")
+        return None
+
+
+@tree.command(name="bracket_open", description="Open a ticket for a captain's next Challonge bracket match")
+@app_commands.describe(
+    captain_name="The captain's name as shown on the Challonge bracket",
+    captain_id="The captain's Discord account (mention them)"
+)
+async def bracket_open(
+    interaction: discord.Interaction,
+    captain_name: str,
+    captain_id: discord.Member
+):
+    """Open a match ticket based on the captain's next match in the Challonge bracket."""
+
+    # ── Permission check ──────────────────────────────────────────────────────
+    if not has_event_create_permission(interaction):
+        await interaction.response.send_message(
+            "❌ You need **Head Organizer**, **Head Helper**, or **Helper Team** role to use this command.",
+            ephemeral=True
+        )
+        return
+
+    if not CHALLONGE_API_KEY:
+        await interaction.response.send_message(
+            "❌ **Challonge API key not configured.**\n"
+            "Please ask the bot owner to add `CHALLONGE_API_KEY=<your_key>` to the `.env` file.\n"
+            "Get your API key at: https://challonge.com/settings#api-override",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    tournament_slug = CHALLONGE_TOURNAMENT_URL.strip().rstrip("/").split("/")[-1]
+
+    # ── 1. Fetch participants ─────────────────────────────────────────────────
+    participants_data = await _fetch_challonge(
+        f"tournaments/{tournament_slug}/participants.json"
+    )
+    if participants_data is None:
+        await interaction.followup.send(
+            f"❌ Could not fetch participants from Challonge.\n"
+            f"Make sure the tournament `{tournament_slug}` exists and your API key is valid.",
+            ephemeral=True
+        )
+        return
+
+    # Find participant matching captain_name (case-insensitive partial match)
+    participant = None
+    captain_name_lower = captain_name.lower().strip()
+    for p in participants_data:
+        p_info = p.get("participant", p)
+        p_name = (p_info.get("name") or p_info.get("display_name") or "").lower()
+        if captain_name_lower in p_name or p_name in captain_name_lower:
+            participant = p_info
+            break
+
+    if not participant:
+        # Show available names to help the user
+        all_names = [
+            (p.get("participant", p).get("name") or p.get("participant", p).get("display_name") or "?")
+            for p in participants_data
+        ]
+        names_list = "\n".join(f"• {n}" for n in sorted(all_names)[:25])
+        await interaction.followup.send(
+            f"❌ Could not find **`{captain_name}`** in the Challonge bracket for `{tournament_slug}`.\n\n"
+            f"**Available participants:**\n{names_list}",
+            ephemeral=True
+        )
+        return
+
+    participant_id = participant.get("id")
+    bracket_display_name = participant.get("name") or participant.get("display_name") or captain_name
+
+    # ── 2. Fetch matches ──────────────────────────────────────────────────────
+    matches_data = await _fetch_challonge(
+        f"tournaments/{tournament_slug}/matches.json",
+        {"participant_id": participant_id}
+    )
+    if matches_data is None:
+        await interaction.followup.send("❌ Could not fetch matches from Challonge.", ephemeral=True)
+        return
+
+    # Find next open/pending match for this participant
+    next_match = None
+    for m in matches_data:
+        m_info = m.get("match", m)
+        state = m_info.get("state", "")
+        if state in ("open", "pending"):
+            p1_id = m_info.get("player1_id")
+            p2_id = m_info.get("player2_id")
+            if participant_id in (p1_id, p2_id):
+                next_match = m_info
+                break
+
+    if next_match is None:
+        await interaction.followup.send(
+            f"ℹ️ **{bracket_display_name}** has no open or pending matches in the bracket right now.\n"
+            f"This could mean:\n"
+            f"• They are waiting for a previous match result to be submitted\n"
+            f"• They have been eliminated\n"
+            f"• The tournament hasn't started yet",
+            ephemeral=True
+        )
+        return
+
+    # ── 3. Identify the opponent ──────────────────────────────────────────────
+    p1_id = next_match.get("player1_id")
+    p2_id = next_match.get("player2_id")
+    opponent_challonge_id = p2_id if participant_id == p1_id else p1_id
+    round_number = next_match.get("round", 1)
+    match_id = next_match.get("id")
+
+    # Determine round label
+    if round_number > 0:
+        round_label = f"R{round_number}"
+    else:
+        # Negative rounds = losers bracket in double elimination
+        round_label = f"LR{abs(round_number)}"
+
+    # Fetch opponent name from participants list
+    opponent_name = "TBD"
+    for p in participants_data:
+        p_info = p.get("participant", p)
+        if p_info.get("id") == opponent_challonge_id:
+            opponent_name = p_info.get("name") or p_info.get("display_name") or "TBD"
+            break
+
+    # ── 4. Create ticket channel ──────────────────────────────────────────────
+    guild = interaction.guild
+
+    # Build channel name
+    cap_slug = re.sub(r'[^a-z0-9]', '-', bracket_display_name.lower())
+    opp_slug = re.sub(r'[^a-z0-9]', '-', opponent_name.lower())
+    cap_slug = re.sub(r'-+', '-', cap_slug).strip('-')
+    opp_slug = re.sub(r'-+', '-', opp_slug).strip('-')
+    channel_name = f"{round_label.lower()}-{cap_slug}-vs-{opp_slug}"
+    if len(channel_name) > 100:
+        channel_name = channel_name[:100]
+
+    # Check if a channel with this name already exists
+    existing_channel = discord.utils.get(guild.channels, name=channel_name)
+    if existing_channel:
+        await interaction.followup.send(
+            f"⚠️ A ticket channel already exists: {existing_channel.mention}\n"
+            f"If this is incorrect, please rename or delete it and try again.",
+            ephemeral=True
+        )
+        return
+
+    # Determine category
+    category = None
+    if TICKET_CATEGORY_ID:
+        category = guild.get_channel(TICKET_CATEGORY_ID)
+    if category is None and interaction.channel.category:
+        category = interaction.channel.category
+
+    # Build overwrites: deny @everyone view, allow captain + bot
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True),
+        captain_id: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+    }
+
+    try:
+        ticket_channel = await guild.create_text_channel(
+            name=channel_name,
+            category=category,
+            overwrites=overwrites,
+            reason=f"Bracket open: {bracket_display_name} vs {opponent_name} ({round_label})"
+        )
+    except discord.Forbidden:
+        await interaction.followup.send("❌ I don't have permission to create channels in this server.", ephemeral=True)
+        return
+    except discord.HTTPException as e:
+        await interaction.followup.send(f"❌ Failed to create channel: {e}", ephemeral=True)
+        return
+
+    # ── 5. Send the bracket match info embed ─────────────────────────────────
+    embed = discord.Embed(
+        title="🏆 Bracket Match Ticket Opened",
+        description=f"This channel has been opened for your **{round_label}** bracket match.",
+        color=0xFFAA00,
+        timestamp=discord.utils.utcnow()
+    )
+
+    # Try to add logo thumbnail
+    logo_path = os.path.join(os.path.dirname(__file__), "PHOENIX Modern Warship Logo.jpg")
+    if os.path.exists(logo_path):
+        embed.set_thumbnail(url="attachment://logo.jpg")
+
+    embed.add_field(
+        name="📋 Match Details",
+        value=(
+            f"**Round:** {round_label}\n"
+            f"**Challonge Match ID:** `{match_id}`\n"
+            f"**Bracket:** [{tournament_slug}](https://challonge.com/{tournament_slug})"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="👥 Match Participants",
+        value=(
+            f"**Captain 1 (You):** {bracket_display_name} ({captain_id.mention})\n"
+            f"**Opponent:** {opponent_name} *(Discord: Please tag them or ask staff to add them)*"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="📢 Tournament Information",
+        value=(
+            "• Refer to <#1467196270836715601> for match schedules and pairings.\n"
+            "• Refer to <#1467196182236369099> for official updates.\n"
+            "• Refer to <#1467196250414907506> for tournament guidelines and regulations."
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="🆘 Need Help?",
+        value="If you require assistance, please ping <@&1467201706633986251> and they will be happy to assist.",
+        inline=False
+    )
+
+    embed.add_field(
+        name="⚙️ Next Steps for Staff",
+        value=(
+            f"• Use `/add_captain` to rename the channel and add both captains properly.\n"
+            f"• Once result is submitted on Challonge, run `/bracket_open` again for the **next round** ticket."
+        ),
+        inline=False
+    )
+
+    embed.set_footer(text=f"{ORGANIZATION_NAME} | Opened by {interaction.user.name} | {datetime.datetime.now().strftime('%d-%m-%Y %H:%M')}")
+
+    # Send the embed in the new channel
+    try:
+        files_to_send = []
+        if os.path.exists(logo_path):
+            with open(logo_path, "rb") as lf:
+                logo_data = io.BytesIO(lf.read())
+                files_to_send.append(discord.File(logo_data, filename="logo.jpg"))
+
+        await ticket_channel.send(
+            content=f"🔔 {captain_id.mention} — Your bracket match room is ready!",
+            embed=embed,
+            files=files_to_send if files_to_send else discord.utils.MISSING
+        )
+    except Exception as e:
+        print(f"Error sending embed to bracket channel: {e}")
+        await ticket_channel.send(embed=embed)
+
+    # Store in scheduled_events so other commands recognise the channel
+    try:
+        event_id = f"BRK-{match_id}-{int(datetime.datetime.now().timestamp())}"
+        event_data = {
+            'id': event_id,
+            'event_id': event_id,
+            'team1_captain': captain_id,
+            'team2_captain': None,
+            'team1_name': bracket_display_name,
+            'team2_name': opponent_name,
+            'datetime': datetime.datetime.now(pytz.UTC),
+            'time_str': 'TBD',
+            'date_str': 'TBD',
+            'round': round_label,
+            'tournament': tournament_slug,
+            'mode': 'MW',
+            'group': None,
+            'channel_id': ticket_channel.id,
+            'created_at': datetime.datetime.now().isoformat(),
+            'created_by': interaction.user.id,
+            'status': 'scheduled',
+            'challonge_match_id': match_id,
+            'challonge_participant_id': participant_id,
+            'captain1_id': captain_id.id,
+            'captain2_id': None
+        }
+        scheduled_events[event_id] = event_data
+        save_scheduled_events()
+        sheet_manager.log_event_creation(event_data)
+    except Exception as e:
+        print(f"Error saving bracket event: {e}")
+
+    # Confirm to the staff member who ran the command
+    await interaction.followup.send(
+        f"✅ **Ticket opened!** {ticket_channel.mention}\n"
+        f"**Match:** {bracket_display_name} vs **{opponent_name}** ({round_label})\n"
+        f"**Challonge Match ID:** `{match_id}`\n\n"
+        f"*Once both captains play and the result is submitted on Challonge, "
+        f"run `/bracket_open` again for the next round.*",
+        ephemeral=True
+    )
 
 
 if __name__ == "__main__":
